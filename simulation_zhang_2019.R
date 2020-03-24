@@ -2,6 +2,8 @@ set.seed(123)
 library(SuperLearner) # for running machine learning algorithms
 library(tidyverse)
 library(xtable) # for creating latex code of the summary table
+library(readstata13)
+center <- function(x){x-mean(x)}
 
 #' @param Y Continuous outcome
 #' @param A Binary treatment indicator
@@ -12,8 +14,9 @@ library(xtable) # for creating latex code of the summary table
 #' @return a matrix with 2 columns and 8 rows. 
 #' Rows represent results from the unadjusted estimator, ANCOVA, lasso, ridge, 
 #' GAM, rpart, random forest and an ensemble of these methods using SuperLearner.
-#' Columns represent: sample variance of point estimates without CV (first column) 
-#' and with 5-fold CV (second column) using the "indirect method" descibed in Zhang et al. (2019).
+#' Columns represent: point estimate of ATE (first column) and its asymptotic variance (second column) without CV,
+#' point estimate of ATE (third column) and its asymptotic variance (fourth column) with 20-fold CV
+#' using the "indirect method" descibed in Zhang et al. (2019).
 #' @export
 #'
 #' @examples
@@ -21,25 +24,29 @@ library(xtable) # for creating latex code of the summary table
 #' A <- rbinom(n, 1, 0.5)
 #' W <- data.frame(matrix(rnorm(n*5), nrow = n))
 #' Y <- A * (W[,1]-W[,2])^2 + (1-A) * (W[,3] + W[,4]) + rnorm(n)
-#' cov_adj_variance(Y, A, W)
-cov_adj_zhang_indirect <- function(Y, A, W, pi = 0.5, n_fold = 5){
+#' cov_adj_zhang_indirect(Y, A, W)
+cov_adj_zhang_indirect <- function(Y, A, W, pi = 0.5, n_fold = 20){
   n <- length(Y)
   test_size <- floor(n/n_fold)
   SL.library <- c("SL.mean", "SL.glm", "SL.glmnet", "SL.ridge", "SL.gam", "SL.rpart", "SL.randomForest")
-  var_table <- matrix(NA, nrow = 8, ncol = 2)
+  var_table <- matrix(NA, nrow = 8, ncol = 4)
   rownames(var_table) <- c(SL.library, "SL.ensemble")
-  colnames(var_table) <- c("non-CV", "CV")
+  colnames(var_table) <- c("est-no-CV", "var-no-CV", "est-CV", "var-CV")
+  bar_A <- mean(A)
+  psi_hat <- A * (Y - mean(Y[A==1]))/bar_A - (1-A) * (Y - mean(Y[A==0]))/(1-bar_A)
   
-  # non-CV variance
-  SLfit.1 <- SuperLearner(Y[A==1], W[A==1,], newX = W, family = "gaussian", SL.library = SL.library, cvControl = list(V=5))
-  SLfit.0 <- SuperLearner(Y[A==0], W[A==0,], newX = W, family = "gaussian", SL.library = SL.library, cvControl = list(V=5))
-  
+  # non-CV
+  SLfit.1 <- SuperLearner(2 * Y[A==1], W[A==1,], newX = W, family = "gaussian", SL.library = SL.library, cvControl = list(V=5))
+  SLfit.0 <- SuperLearner(2 * Y[A==0], W[A==0,], newX = W, family = "gaussian", SL.library = SL.library, cvControl = list(V=5))
+
   for(i in 1:length(SL.library)){
-    var_table[i, 1] <-  var(A*Y/pi - (1-A)*Y/pi - (A-pi)*(SLfit.1$library.predict[,i]/pi + SLfit.0$library.predict[,i]/(1-pi)))
+    var_table[i, "est-no-CV"] <- mean(Y[A==1]) - mean(Y[A==0]) - mean((A-bar_A)*(SLfit.1$library.predict[,i] + SLfit.0$library.predict[,i]))
+    var_table[i, "var-no-CV"] <-  var(psi_hat - (A-bar_A)*(center(SLfit.1$library.predict[,i] + SLfit.0$library.predict[,i])))
   }
-  var_table[8, 1] <- var(A * Y / pi  - (1-A) * Y/pi  - (A - pi) * (SLfit.1$SL.predict/pi + SLfit.0$SL.predict/(1-pi)))
+  var_table[8, "est-no-CV"] <- mean(Y[A==1]) - mean(Y[A==0]) - mean((A-bar_A)*(SLfit.1$SL.predict + SLfit.0$SL.predict))
+  var_table[8, "var-no-CV"] <- var(psi_hat  - (A-bar_A)*(center(SLfit.1$SL.predict + SLfit.0$SL.predict)))
   
-  # CVed variance
+  # CVed
   random_order <- sample(1:n, replace = F)
   random_partition <- map(1:n_fold, ~random_order[(.-1)*test_size + 1:test_size])
   random_partition[[n_fold]] <- random_order[((n_fold-1)*test_size + 1):n]
@@ -50,18 +57,20 @@ cov_adj_zhang_indirect <- function(Y, A, W, pi = 0.5, n_fold = 5){
     Y_test <- Y[random_partition[[k]]]
     A_test <- A[random_partition[[k]]]
     W_test <- W[random_partition[[k]], ]
-    SLfit.1 <- SuperLearner(Y_train[A_train==1], W_train[A_train==1,], newX = W_test, family = "gaussian", SL.library = SL.library, cvControl = list(V=5))
-    SLfit.0 <- SuperLearner(Y_train[A_train==0], W_train[A_train==0,], newX = W_test, family = "gaussian", SL.library = SL.library, cvControl = list(V=5))
+    SLfit.1 <- SuperLearner(2 * Y_train[A_train==1], W_train[A_train==1,], newX = W_test, family = "gaussian", SL.library = SL.library, cvControl = list(V=5))
+    SLfit.0 <- SuperLearner(2 * Y_train[A_train==0], W_train[A_train==0,], newX = W_test, family = "gaussian", SL.library = SL.library, cvControl = list(V=5))
     cbind(
-      (A_test*Y_test/pi - (1- A_test)*Y_test/pi) %*% t(rep(1,length(SL.library))) - (A_test-pi)*(SLfit.1$library.predict/pi + SLfit.0$library.predict/(1-pi)),
-      A_test * Y_test / pi  - (1- A_test) * Y_test/pi  - (A_test - pi) * (SLfit.1$SL.predict/pi + SLfit.0$SL.predict/(1-pi))
+      SLfit.1$library.predict + SLfit.0$library.predict, SLfit.1$SL.predict + SLfit.0$SL.predict
     )
   })
   combined_cv_resutls <- NULL
   for(k in 1:n_fold){
     combined_cv_resutls <- rbind(combined_cv_resutls, cv_results[[k]])
   }
-  var_table[,2] <- apply(combined_cv_resutls, 2, var)
+  for(i in 1:8){
+    var_table[i,"est-CV"] <- mean(Y[A==1]) - mean(Y[A==0]) - mean((A[random_order] - bar_A) * center(combined_cv_resutls[,i]))
+    var_table[i,"var-CV"] <- var(psi_hat[random_order] - (A[random_order] - bar_A) * center(combined_cv_resutls[,i]))
+  }
   return(var_table)
 }
 
@@ -83,25 +92,27 @@ cov_adj_zhang_indirect <- function(Y, A, W, pi = 0.5, n_fold = 5){
 #' A <- rbinom(n, 1, 0.5)
 #' W <- data.frame(matrix(rnorm(n*5), nrow = n))
 #' Y <- A * (W[,1]-W[,2])^2 + (1-A) * (W[,3] + W[,4]) + rnorm(n)
-#' cov_adj_variance(Y, A, W)
-cov_adj_zhang_direct <- function(Y, A, W, n_fold = 5){
-  # psi(A,Y)/(A-pi) = 4*Y
-  pi <- 0.5
+#' cov_adj_zhang_direct(Y - mean(Y), A, W)
+cov_adj_zhang_direct <- function(Y, A, W, pi = 0.5, n_fold = 20){
   n <- length(Y)
   test_size <- floor(n/n_fold)
   SL.library <- c("SL.mean", "SL.glm", "SL.glmnet", "SL.ridge", "SL.gam", "SL.rpart", "SL.randomForest")
-  var_table <- matrix(NA, nrow = 8, ncol = 2)
+  var_table <- matrix(NA, nrow = 8, ncol = 4)
   rownames(var_table) <- c(SL.library, "SL.ensemble")
-  colnames(var_table) <- c("non-CV", "CV")
+  colnames(var_table) <- c("est-no-CV", "var-no-CV", "est-CV", "var-CV")
+  bar_A <- mean(A)
+  psi_hat <- A * (Y - mean(Y[A==1]))/bar_A - (1-A) * (Y - mean(Y[A==0]))/(1-bar_A)
   
-  # non-CV variance
-  SLfit <- SuperLearner (4 * Y, W, newX = W, family = "gaussian", SL.library = SL.library, cvControl = list(V=5))
+  # non-CV
+  SLfit <- SuperLearner(4 * Y, W, newX = W, family = "gaussian", SL.library = SL.library, cvControl = list(V=5))
   for(i in 1:length(SL.library)){
-    var_table[i, 1] <-  var(A*Y/pi - (1-A)*Y/pi - (A-pi)* SLfit$library.predict[,i])
+    var_table[i, "est-no-CV"] <- mean(Y[A==1]) - mean(Y[A==0]) - mean((A-bar_A) * center(SLfit$library.predict[,i]))
+    var_table[i, "var-no-CV"] <-  var(psi_hat - (A-bar_A) * center(SLfit$library.predict[,i]))
   }
-  var_table[8, 1] <- var(A * Y / pi  - (1-A) * Y/pi  - (A - pi) * SLfit$SL.predict)
+  var_table[8, "est-no-CV"] <- mean(Y[A==1]) - mean(Y[A==0]) - mean((A-bar_A) * center(SLfit$SL.predict))
+  var_table[8, "var-no-CV"] <- var(psi_hat  - (A-bar_A) * center(SLfit$SL.predict))
   
-  # CVed variance
+  # CVed
   random_order <- sample(1:n, replace = F)
   random_partition <- map(1:n_fold, ~random_order[(.-1)*test_size + 1:test_size])
   random_partition[[n_fold]] <- random_order[((n_fold-1)*test_size + 1):n]
@@ -112,23 +123,23 @@ cov_adj_zhang_direct <- function(Y, A, W, n_fold = 5){
     Y_test <- Y[random_partition[[k]]]
     A_test <- A[random_partition[[k]]]
     W_test <- W[random_partition[[k]], ]
-    SLfit <- SuperLearner (4 * Y_train, W_train, newX = W_test, family = "gaussian", SL.library = SL.library, cvControl = list(V=5))
-    cbind(
-      (A_test*Y_test/pi - (1- A_test)*Y_test/pi) %*% t(rep(1,length(SL.library))) - (A_test-pi)*SLfit$library.predict,
-      A_test * Y_test / pi  - (1- A_test) * Y_test/pi  - (A_test - pi) * SLfit$SL.predict
-    )
+    SLfit <- SuperLearner(4 * Y_train, W_train, newX = W_test, family = "gaussian", SL.library = SL.library, cvControl = list(V=5))
+    cbind(SLfit$library.predict, SLfit$SL.predict)
   })
   combined_cv_resutls <- NULL
   for(k in 1:n_fold){
     combined_cv_resutls <- rbind(combined_cv_resutls, cv_results[[k]])
   }
-  var_table[,2] <- apply(combined_cv_resutls, 2, var)
+  for(i in 1:8){
+    var_table[i,"est-CV"] <- mean(Y[A==1]) - mean(Y[A==0]) - mean((A[random_order] - bar_A) * center(combined_cv_resutls[,i]))
+    var_table[i,"var-CV"] <- var(psi_hat[random_order] - (A[random_order] - bar_A) * center(combined_cv_resutls[,i]))
+  }
   return(var_table)
 }
 
 # data analysis ----------------
 # MCI (Donepezil vs Placebo)
-load("ACDS.rdata")
+load("data/ACDS.rdata")
 d <- subset(d, (d$arm != "Vitamin E") & (!is.na(d$Y18)))
 Y <- d$Y18 - d$Y0
 A <- d$arm == "Donepezil"
@@ -138,7 +149,7 @@ MCI_Donepezil_direct <- cov_adj_zhang_direct(Y, A, W)
 MCI_Donepezil <- cbind(MCI_Donepezil_indirect, MCI_Donepezil_direct)
 
 # MCI (Vitamin E vs Placebo)
-load("ACDS.rdata")
+load("data/ACDS.rdata")
 d <- subset(d, (d$arm != "Donepezil") & (!is.na(d$Y18)))
 Y <- d$Y18 - d$Y0
 A <- d$arm == "Vitamin E"
@@ -148,7 +159,7 @@ MCI_VE_direct <- cov_adj_zhang_direct(Y, A, W)
 MCI_VE <- cbind(MCI_VE_indirect, MCI_VE_direct)
 
 # CLEAR III
-clearIII <- readxl::read_xlsx(path = "CLEAR_III_master_file_9.26.2018.xlsx")
+clearIII <- readxl::read_xlsx(path = "data/CLEAR_III_master_file_9.26.2018.xlsx")
 clearIII <- clearIII %>%
   select("study_arm","glasgow_rankin_365", "randomization_gcs_Total",
          "stabct_ich_volume_rc", "randomization_nihss_total",
@@ -166,33 +177,78 @@ clear3_indirect <- cov_adj_zhang_indirect(Y, A, W)
 clear3_direct <- cov_adj_zhang_direct(Y, A, W)
 clear3 <- cbind(clear3_indirect, clear3_direct)
 
-saveRDS(object = rbind(MCI_Donepezil, MCI_VE, clear3), file = "zhang_data_analysis.rds")
-# xtable(rbind(MCI_Donepezil, MCI_VE, clear3))
+# TADS
+load("data/TADS.rdata")
+tad <- subset(tad, !is.na(tad$CDRS_12))
+Y <- tad$change_score
+A <- tad$treatment %in% c("FLX", "COMB")
+W <- select(tad, age, gender, CDRS_baseline, CGI, CGAS,RADS, depression_episode)
+TADS_indirect <- cov_adj_zhang_indirect(Y, A, W)
+TADS_direct <- cov_adj_zhang_direct(Y, A, W)
+TADS <- cbind(TADS_indirect, TADS_direct)
+
+
+# ASI
+merged_ASI <- read.dta13("data/merged_ASI.dta")
+merged_ASI <- merged_ASI %>% select(studyid:race, reduc_stim, ASIpsy_B: stimulant_B) %>% filter(!is.na(reduc_stim))
+Y <- merged_ASI$reduc_stim
+A <- merged_ASI$arm == "Treatment"
+W <- merged_ASI %>% select(sex:age, ASIpsy_B: stimulant_B)
+W$sex <- W$sex == "Female"
+for(j in 2:10){
+  W[is.na(W[,j]),j] <- median(W[,j], na.rm = T)
+}
+ASI_indirect <- cov_adj_zhang_indirect(Y, A, W)
+ASI_direct <- cov_adj_zhang_direct(Y, A, W)
+ASI <- cbind(ASI_indirect, ASI_direct)
+
+saveRDS(object = rbind(MCI_Donepezil, MCI_VE, clear3, TADS, ASI), file = "zhang_data_analysis.rds")
 
 # simulation 1 (zhang et al. Sample with replacement) ------------
-n <- 200
-n_sim <- 500
+library(foreach) # for parallel programming
+library(doParallel) # for parallel programming
+cl <- makeCluster(16)
+registerDoParallel(cl)
+simulation_wrapper <- function(Y, W, pi = 0.5, n_fold = 5, resample_size = 200, n_sim = 1000, replacement = T){
+  simulation_result <- foreach(i=1:n_sim, .packages=c('tidyverse','SuperLearner'), .export = c('center', 'cov_adj_zhang_indirect', 'cov_adj_zhang_direct')) %dopar% {
+    sample_indi <- sample(1:length(Y), size = resample_size, replace = replacement)
+    Y_sample <- Y[sample_indi]
+    W_sample <- W[sample_indi, ]
+    A_sample <- rbinom(resample_size, size = 1, prob = pi)
+    indirect <- cov_adj_zhang_indirect(Y_sample, A_sample, W_sample, pi = pi, n_fold = n_fold)
+    direct <- cov_adj_zhang_direct(Y_sample, A_sample, W_sample, pi = pi, n_fold = n_fold)
+    cbind(indirect, direct)
+  }
+  sim_result <- matrix(NA, nrow = 8, ncol = 10)
+  colnames(sim_result) <- rep(c("Bias", "SD", "RE", "SE", "SE(CV)"), 2)
+  rownames(sim_result) <- rownames(simulation_result[[1]])
+  for(i in 1:8){
+    sim_result[i,1] <- mean(map_dbl(simulation_result, ~.[i,3]))
+    sim_result[i,2] <- sd(map_dbl(simulation_result, ~.[i,3]))
+    sim_result[i,3] <- (sim_result[1,2]/sim_result[i,2])^2
+    sim_result[i,4] <- sqrt(median(map_dbl(simulation_result, ~.[i,2]))/200)
+    sim_result[i,5] <- sqrt(median(map_dbl(simulation_result, ~.[i,4]))/200)
+    sim_result[i,6] <- mean(map_dbl(simulation_result, ~.[i,7]))
+    sim_result[i,7] <- sd(map_dbl(simulation_result, ~.[i,7]))
+    sim_result[i,8] <- (sim_result[1,7]/sim_result[i,7])^2
+    sim_result[i,9] <- sqrt(median(map_dbl(simulation_result, ~.[i,6]))/200)
+    sim_result[i,10] <- sqrt(median(map_dbl(simulation_result, ~.[i,8]))/200)
+  }
+  return(sim_result)
+}
 # MCI simulation
-load("ACDS.rdata")
+load("data/ACDS.rdata")
 d <- subset(d,  (!is.na(d$Y18)))
 Y <- d$Y18 - d$Y0
 W <- select(d, age, female, cototscr, mmscore, adtotscr, gdstot, Y0)
-MCI_sim <- map(1:n_sim, function(j){
-  sample_indi <- sample(1:length(Y), size = n, replace = T)
-  Y_sample <- Y[sample_indi]
-  W_sample <- W[sample_indi, ]
-  A_sample <- rbinom(n, size = 1, prob = 0.5)
-  MCI_indirect <- cov_adj_zhang_indirect(Y_sample, A_sample, W_sample)
-  MCI_direct <- cov_adj_zhang_direct(Y_sample, A_sample, W_sample)
-  cbind(MCI_indirect, MCI_direct)
-})
-MCI_sim_result <- MCI_sim[[1]]
-for(i in 1:length(MCI_sim_result)){
-  MCI_sim_result[i] <- median(map_dbl(MCI_sim, ~.[i]))
-}
+MCI_sim_result_with_replace <- simulation_wrapper(Y,W, replacement = T)
+saveRDS(MCI_sim_result_with_replace, file = "MCI_sim_result_with_replace.rds")
+MCI_sim_result_without_replace <- simulation_wrapper(Y,W, replacement = F)
+saveRDS(MCI_sim_result_without_replace, file = "MCI_sim_result_without_replace.rds")
+
 
 # clearIII simulation
-clearIII <- readxl::read_xlsx(path = "CLEAR_III_master_file_9.26.2018.xlsx")
+clearIII <- readxl::read_xlsx(path = "data/CLEAR_III_master_file_9.26.2018.xlsx")
 clearIII <- clearIII %>%
   select("study_arm","glasgow_rankin_365", "randomization_gcs_Total",
          "stabct_ich_volume_rc", "randomization_nihss_total",
@@ -205,144 +261,60 @@ clearIII <- filter(clearIII, !is.na(glasgow_rankin_365))
 Y <- clearIII$glasgow_rankin_365
 W <- select(clearIII, randomization_gcs_Total, stabct_ich_volume_rc, randomization_nihss_total,
             er_present_nihss_total, stabct_ivh_volume_rc)
-clear3_sim <- map(1:n_sim, function(j){
-  sample_indi <- sample(1:length(Y), size = n, replace = T)
-  Y_sample <- Y[sample_indi]
-  W_sample <- W[sample_indi, ]
-  A_sample <- rbinom(n, size = 1, prob = 0.5)
-  clear3_indirect <- cov_adj_zhang_indirect(Y_sample, A_sample, W_sample)
-  clear3_direct <- cov_adj_zhang_direct(Y_sample, A_sample, W_sample)
-  clear3 <- cbind(clear3_indirect, clear3_direct)
-})
-clear3_sim_result <- clear3_sim[[1]]
-for(i in 1:length(clear3_sim_result)){
-  clear3_sim_result[i] <- median(map_dbl(clear3_sim, ~.[i]))
-}
+clear3_sim_result_with_replace <- simulation_wrapper(Y,W, replacement = T)
+saveRDS(clear3_sim_result_with_replace, file = "clear3_sim_result_with_replace.rds")
+clear3_sim_result_without_replace <- simulation_wrapper(Y,W, replacement = F)
+saveRDS(clear3_sim_result_without_replace, file = "clear3_sim_result_without_replace.rds")
 
 # TADS
-load("TADS.rdata")
+load("data/TADS.rdata")
 tad <- subset(tad, !is.na(tad$CDRS_12))
 Y <- tad$change_score
 W <- select(tad, age, gender, CDRS_baseline, CGI, CGAS,RADS, depression_episode)
-TADS_sim <- map(1:n_sim, function(j){
-  sample_indi <- sample(1:length(Y), size = n, replace = T)
-  Y_sample <- Y[sample_indi]
-  W_sample <- W[sample_indi, ]
-  A_sample <- rbinom(n, size = 1, prob = 0.5)
-  TADS_indirect <- cov_adj_zhang_indirect(Y_sample, A_sample, W_sample)
-  TADS_direct <- cov_adj_zhang_direct(Y_sample, A_sample, W_sample)
-  TADS <- cbind(TADS_indirect, TADS_direct)
-})
-TADS_sim_result <- TADS_sim[[1]]
-for(i in 1:length(TADS_sim_result)){
-  TADS_sim_result[i] <- median(map_dbl(TADS_sim, ~.[i]))
+TADS_sim_result_with_replace <- simulation_wrapper(Y,W, replacement = T)
+saveRDS(TADS_sim_result_with_replace, file = "TADS_sim_result_with_replace.rds")
+TADS_sim_result_without_replace <- simulation_wrapper(Y,W, replacement = F)
+saveRDS(TADS_sim_result_without_replace, file = "TADS_sim_result_without_replace.rds")
+
+# ASI
+merged_ASI <- read.dta13("data/merged_ASI.dta")
+merged_ASI <- merged_ASI %>% select(studyid:race, reduc_stim, ASIpsy_B: stimulant_B) %>% filter(!is.na(reduc_stim))
+Y <- merged_ASI$reduc_stim
+A <- merged_ASI$arm == "Treatment"
+W <- merged_ASI %>% select(sex:age, ASIpsy_B: stimulant_B)
+W$sex <- W$sex == "Female"
+for(j in 2:10){
+  W[is.na(W[,j]),j] <- median(W[,j], na.rm = T)
 }
-
-saveRDS(object = rbind(MCI_sim_result, clear3_sim_result, TADS_sim_result), file = "zhang_sim_analysis.rds")
-
-
-# simulation 2: resample without replacement -----------
-n <- 200
-n_sim <- 500
-# MCI simulation
-load("ACDS.rdata")
-d <- subset(d,  (!is.na(d$Y18)))
-Y <- d$Y18 - d$Y0
-W <- select(d, age, female, cototscr, mmscore, adtotscr, gdstot, Y0)
-MCI_sim <- map(1:n_sim, function(j){
-  sample_indi <- sample(1:length(Y), size = n, replace = F)
-  Y_sample <- Y[sample_indi]
-  W_sample <- W[sample_indi, ]
-  A_sample <- rbinom(n, size = 1, prob = 0.5)
-  MCI_indirect <- cov_adj_zhang_indirect(Y_sample, A_sample, W_sample)
-  MCI_direct <- cov_adj_zhang_direct(Y_sample, A_sample, W_sample)
-  MCI <- cbind(MCI_indirect, MCI_direct)
-})
-MCI_sim_result <- MCI_sim[[1]]
-for(i in 1:length(MCI_sim_result)){
-  MCI_sim_result[i] <- median(map_dbl(MCI_sim, ~.[i]))
-}
-
-# clearIII simulation 
-clearIII <- readxl::read_xlsx(path = "CLEAR_III_master_file_9.26.2018.xlsx")
-clearIII <- clearIII %>% 
-  select("study_arm","glasgow_rankin_365", "randomization_gcs_Total", 
-         "stabct_ich_volume_rc", "randomization_nihss_total",
-         "er_present_nihss_total", "stabct_ivh_volume_rc")
-clearIII$randomization_nihss_total[which(is.na(clearIII$randomization_nihss_total))] <- median(clearIII$randomization_nihss_total, na.rm = T)
-clearIII$er_present_nihss_total[which(is.na(clearIII$er_present_nihss_total))] <- median(clearIII$er_present_nihss_total, na.rm = T)
-clearIII$randomization_gcs_Total <- as.numeric(clearIII$randomization_gcs_Total)
-clearIII$randomization_gcs_Total[which(is.na(clearIII$randomization_gcs_Total))] <- median(clearIII$randomization_gcs_Total, na.rm = T)
-clearIII <- filter(clearIII, !is.na(glasgow_rankin_365))
-Y <- clearIII$glasgow_rankin_365
-W <- select(clearIII, randomization_gcs_Total, stabct_ich_volume_rc, randomization_nihss_total,
-            er_present_nihss_total, stabct_ivh_volume_rc)
-clear3_sim <- map(1:n_sim, function(j){
-  sample_indi <- sample(1:length(Y), size = n, replace = F)
-  Y_sample <- Y[sample_indi]
-  W_sample <- W[sample_indi, ]
-  A_sample <- rbinom(n, size = 1, prob = 0.5)
-  clear3_indirect <- cov_adj_zhang_indirect(Y_sample, A_sample, W_sample)
-  clear3_direct <- cov_adj_zhang_direct(Y_sample, A_sample, W_sample)
-  clear3 <- cbind(clear3_indirect, clear3_direct)
-})
-clear3_sim_result <- clear3_sim[[1]]
-for(i in 1:length(clear3_sim_result)){
-  clear3_sim_result[i] <- median(map_dbl(clear3_sim, ~.[i]))
-}
-
-# TADS
-load("TADS.rdata")
-tad <- subset(tad, !is.na(tad$CDRS_12))
-Y <- tad$change_score
-W <- select(tad, age, gender, CDRS_baseline, CGI, CGAS,RADS, depression_episode)
-TADS_sim <- map(1:n_sim, function(j){
-  sample_indi <- sample(1:length(Y), size = n, replace = F)
-  Y_sample <- Y[sample_indi]
-  W_sample <- W[sample_indi, ]
-  A_sample <- rbinom(n, size = 1, prob = 0.5)
-  TADS_indirect <- cov_adj_zhang_indirect(Y_sample, A_sample, W_sample)
-  TADS_direct <- cov_adj_zhang_direct(Y_sample, A_sample, W_sample)
-  TADS <- cbind(TADS_indirect, TADS_direct)
-})
-TADS_sim_result <- TADS_sim[[1]]
-for(i in 1:length(TADS_sim_result)){
-  TADS_sim_result[i] <- median(map_dbl(TADS_sim, ~.[i]))
-}
-
-saveRDS(object = rbind(MCI_sim_result, clear3_sim_result, TADS_sim_result), file = "zhang_sim_noreplacement.rds")
+ASI_sim_result_with_replace <- simulation_wrapper(Y,W, replacement = T)
+saveRDS(ASI_sim_result_with_replace, file = "ASI_sim_result_with_replace.rds")
+ASI_sim_result_without_replace <- simulation_wrapper(Y,W, replacement = F)
+saveRDS(ASI_sim_result_without_replace, file = "ASI_sim_result_without_replace.rds")
 
 
-
-##### presenting results ------------
-sim_results <- readRDS("zhang_data_analysis.rds")
+# ##### presenting results ------------
+sim_results <- readRDS("zhang_data_analysis.rds") %>% .[,c(2,4,6,8)]
 for(i in 2:8){sim_results[i,] <- sim_results[1,]/sim_results[i,]}
 sim_results[1,] <- rep(1, 4)
 for(i in 10:16){sim_results[i,] <- sim_results[9,]/sim_results[i,]}
 sim_results[9,] <- rep(1, 4)
 for(i in 18:24){sim_results[i,] <- sim_results[17,]/sim_results[i,]}
 sim_results[17,] <- rep(1, 4)
+for(i in 26:32){sim_results[i,] <- sim_results[25,]/sim_results[i,]}
+sim_results[25,] <- rep(1, 4)
+for(i in 34:40){sim_results[i,] <- sim_results[33,]/sim_results[i,]}
+sim_results[33,] <- rep(1, 4)
 round(sim_results,2)
 xtable(sim_results)
 
+# Simulation with replacement
+readRDS("MCI_sim_result_with_replace.rds") %>% round(2) %>% xtable
+readRDS("clear3_sim_result_with_replace.rds") %>% round(2) %>% xtable
+readRDS("TADS_sim_result_with_replace.rds") %>% round(2) %>% xtable
+readRDS("ASI_sim_result_with_replace.rds") %>% round(2) %>% xtable
 
-sim_results <- readRDS("zhang_sim_analysis.rds")
-for(i in 2:8){sim_results[i,] <- sim_results[1,]/sim_results[i,]}
-sim_results[1,] <- rep(1, 4)
-for(i in 10:16){sim_results[i,] <- sim_results[9,]/sim_results[i,]}
-sim_results[9,] <- rep(1, 4)
-for(i in 18:24){sim_results[i,] <- sim_results[17,]/sim_results[i,]}
-sim_results[17,] <- rep(1, 4)
-round(sim_results,2)
-xtable(sim_results)
-
-
-sim_results <- readRDS("zhang_sim_noreplacement.rds")
-for(i in 2:8){sim_results[i,] <- sim_results[1,]/sim_results[i,]}
-sim_results[1,] <- rep(1, 4)
-for(i in 10:16){sim_results[i,] <- sim_results[9,]/sim_results[i,]}
-sim_results[9,] <- rep(1, 4)
-for(i in 18:24){sim_results[i,] <- sim_results[17,]/sim_results[i,]}
-sim_results[17,] <- rep(1, 4)
-round(sim_results,2)
-xtable(sim_results)
+# Simulation without replacement
+readRDS("MCI_sim_result_without_replace.rds") %>% round(2) %>% xtable
+readRDS("clear3_sim_result_without_replace.rds") %>% round(2) %>% xtable
+readRDS("TADS_sim_result_without_replace.rds") %>% round(2) %>% xtable
+readRDS("ASI_sim_result_without_replace.rds") %>% round(2) %>% xtable
