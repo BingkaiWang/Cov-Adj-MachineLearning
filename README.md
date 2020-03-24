@@ -1,3 +1,3 @@
 # Cov-Adj-MachineLearning
 
-Code is for Tables 6-8 in manuscript.
+Code is for Tables 1-3 and Figures 1-2 in manuscript.
